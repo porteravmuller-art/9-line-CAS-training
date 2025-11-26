@@ -1,0 +1,255 @@
+<!-- index.html - CAS 9-Line Trainer -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>CAS 9-Line Trainer</title>
+<style>
+  /* minimal styles optimized for phone */
+  body{font-family:system-ui,-apple-system; background:#07110a; color:#dff0d8; margin:0; padding:18px; -webkit-touch-callout:none}
+  .app{max-width:520px;margin:0 auto}
+  header{display:flex;justify-content:space-between;align-items:center}
+  h1{font-size:18px;margin:0}
+  .panel{background:#102114;padding:12px;border-radius:12px;margin-top:12px}
+  .display{background:#061207;padding:10px;border-radius:8px;min-height:80px; font-family:monospace; font-size:14px; overflow:auto}
+  .controls{display:flex;gap:8px;margin-top:12px}
+  button{padding:12px;border-radius:10px;border:0;background:#12641c;color:white;font-weight:700}
+  button.ptt{background:linear-gradient(#8a1200,#5d0a00)}
+  select,input{padding:8px;border-radius:8px;background:transparent;border:1px solid rgba(255,255,255,0.06); color:inherit}
+  .small{font-size:13px;color:#bfe7b8}
+  .log{max-height:200px;overflow:auto;margin-top:8px}
+  .row{display:flex;gap:8px}
+  footer{font-size:12px;opacity:.8;margin-top:10px}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>CAS 9-Line Trainer</h1>
+    <div class="small">CALLSIGN: <strong id="callsignDisplay">Scooter 1-6</strong></div>
+  </header>
+
+  <div class="panel">
+    <div class="row" style="margin-bottom:8px">
+      <select id="pilotSelect">
+        <option value="A-10">A-10 (Warthog)</option>
+        <option value="C-130">C-130 (Spooky)</option>
+        <option value="F-16" selected>F-16 (Viper)</option>
+        <option value="F-35">F-35 (Lightning)</option>
+        <option value="F/A-18">F/A-18 (Hornet)</option>
+      </select>
+      <input id="groundCallsign" value="Scooter 1-6" />
+    </div>
+
+    <div class="display" id="transcriptBox">
+      <div class="line">SYSTEM: Ready. Press & hold PTT to speak.</div>
+    </div>
+
+    <div class="controls">
+      <button id="ptt" class="ptt">HOLD TO TRANSMIT</button>
+      <button id="missionBtn">New Mission</button>
+      <button id="logBtn">Export Log</button>
+    </div>
+
+    <div class="panel" style="margin-top:10px">
+      <div class="small">Radio Net</div>
+      <div class="row" style="margin-top:8px">
+        <button id="toggleNet">Toggle Multi-Aircraft</button>
+        <button id="recordBtn">Record</button>
+        <button id="downloadAudio">Download Last Clip</button>
+      </div>
+
+      <div class="log" id="callLog"></div>
+    </div>
+
+    <footer>
+      Add to Home Screen: Safari → Share → Add to Home Screen.
+    </footer>
+  </div>
+</div>
+
+<script>
+/* CONFIG - set this to your deployed backend URL after deploying server.js */
+const API_BASE = location.origin; // change to 'https://your-backend.example.com' after deploying
+
+// Elements
+const ptt = document.getElementById('ptt');
+const missionBtn = document.getElementById('missionBtn');
+const transcriptBox = document.getElementById('transcriptBox');
+const pilotSelect = document.getElementById('pilotSelect');
+const groundCallsign = document.getElementById('groundCallsign');
+const callLog = document.getElementById('callLog');
+const logBtn = document.getElementById('logBtn');
+const toggleNet = document.getElementById('toggleNet');
+const recordBtn = document.getElementById('recordBtn');
+const downloadAudio = document.getElementById('downloadAudio');
+
+let recognition, usingSpeechAPI=false;
+let logs = [];
+let mediaRecorder;
+let recordedBlobs = [];
+let lastAudioURL = null;
+let multiNet = false;
+
+// Initialize Web Speech if available
+if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+  const ctor = window.SpeechRecognition || window.webkitSpeechRecognition;
+  recognition = new ctor();
+  recognition.lang = 'en-US';
+  recognition.interimResults = false;
+  recognition.maxAlternatives = 1;
+  usingSpeechAPI = true;
+  recognition.onresult = (ev) => {
+    const t = ev.results[0][0].transcript;
+    pushLog(groundCallsign.value + ': ' + t);
+    sendToRealtimeOrFallback(t);
+  };
+  recognition.onerror = (e) => pushLog('SYSTEM: Speech error: ' + e.error);
+} else {
+  pushLog('SYSTEM: SpeechRecognition not available — typed fallback will be used.');
+}
+
+// PTT handlers (touch/mouse)
+ptt.addEventListener('touchstart', startPTT);
+ptt.addEventListener('mousedown', startPTT);
+ptt.addEventListener('touchend', endPTT);
+ptt.addEventListener('mouseup', endPTT);
+
+function startPTT(e){
+  e.preventDefault();
+  ptt.textContent = 'TRANSMITTING...';
+  if (usingSpeechAPI) try { recognition.start(); } catch(e) {}
+  else {
+    const typed = prompt('Type your radio message:');
+    if (typed) { pushLog(groundCallsign.value+': '+typed); sendToRealtimeOrFallback(typed); }
+  }
+}
+function endPTT(e){
+  e.preventDefault();
+  ptt.textContent = 'HOLD TO TRANSMIT';
+  if (usingSpeechAPI) try { recognition.stop(); } catch(e) {}
+}
+
+// Push message to UI log
+function pushLog(text){
+  const d = document.createElement('div');
+  d.textContent = text;
+  callLog.appendChild(d);
+  callLog.scrollTop = callLog.scrollHeight;
+  logs.push({ ts: Date.now(), text });
+}
+
+// Save/export call log as text file
+logBtn.addEventListener('click', ()=>{
+  const txt = logs.map(l=>new Date(l.ts).toLocaleString()+ ' — ' + l.text).join('\n');
+  const blob = new Blob([txt], {type:'text/plain'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href=url; a.download='cas9line_log.txt'; a.click();
+  URL.revokeObjectURL(url);
+});
+
+// Mission generator
+missionBtn.addEventListener('click', ()=>{
+  const mission = genMission();
+  pushLog('MISSION: ' + mission.summary);
+  // And optionally auto-speak the mission instructions
+  speakText('Mission: ' + mission.summary);
+});
+
+// Simple mission generator
+function genMission(){
+  const targets = ['technical truck', 'dismounted squad', 'HVT in tree line', 'enemy patrol', 'AA emplacement'];
+  const target = targets[Math.floor(Math.random()*targets.length)];
+  const dist = Math.floor(Math.random()*900) + 100; // meters
+  const bearing = Math.floor(Math.random()*360);
+  const grid = `43S XD ${Math.floor(10000+Math.random()*89999)} ${Math.floor(10000+Math.random()*89999)}`;
+  return { summary: `${target} ${dist}m at ${bearing}° from you, grid ${grid}`, target, dist, bearing, grid };
+}
+
+// Recording (save radio audio on demand)
+recordBtn.addEventListener('click', async ()=>{
+  if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+    // start recording from mic
+    const stream = await navigator.mediaDevices.getUserMedia({ audio:true });
+    recordedBlobs = [];
+    mediaRecorder = new MediaRecorder(stream);
+    mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) recordedBlobs.push(e.data); };
+    mediaRecorder.onstop = () => {
+      const blob = new Blob(recordedBlobs, { type: 'audio/webm' });
+      lastAudioURL = URL.createObjectURL(blob);
+      pushLog('SYSTEM: Recording stopped. Use Download Last Clip to save.');
+    };
+    mediaRecorder.start();
+    recordBtn.textContent = 'Stop Recording';
+    pushLog('SYSTEM: Recording started.');
+  } else {
+    mediaRecorder.stop();
+    recordBtn.textContent = 'Record';
+  }
+});
+
+downloadAudio.addEventListener('click', ()=>{
+  if (!lastAudioURL) return pushLog('SYSTEM: No audio recorded yet.');
+  const a = document.createElement('a'); a.href = lastAudioURL; a.download = 'cas_clip.webm'; a.click();
+});
+
+// Toggle multi-aircraft net
+toggleNet.addEventListener('click', ()=> {
+  multiNet = !multiNet;
+  pushLog('SYSTEM: Multi-aircraft net ' + (multiNet ? 'ENABLED' : 'DISABLED'));
+});
+
+// Speak TTS for pilot (simple)
+function speakText(text){
+  const u = new SpeechSynthesisUtterance(text);
+  u.rate = 0.95;
+  u.pitch = 1.0;
+  speechSynthesis.speak(u);
+}
+
+// Send to realtime if possible, else fallback to /api/pilot
+async function sendToRealtimeOrFallback(userText){
+  // Try Realtime (WebRTC) flow first
+  try {
+    // ask backend for a realtime offer (server will create an OpenAI Realtime session and return SDPs)
+    const res = await fetch(API_BASE + '/api/realtime/session', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ user_message: userText, pilot: pilotSelect.value, callsign: groundCallsign.value })
+    });
+    if (res.ok) {
+      const j = await res.json();
+      // server returns immediate pilot text reply as 'reply' for quick UX (server can also stream via websockets)
+      if (j.reply) {
+        pushLog(pilotSelect.value + ': ' + j.reply);
+        speakText(pilotSelect.value + ', ' + j.reply);
+      } else {
+        pushLog('SYSTEM: Realtime session created but no immediate reply.');
+      }
+      return;
+    }
+    // if realtime endpoint 404 or 403 -> fallback
+  } catch(err){
+    console.warn('Realtime failed', err);
+  }
+
+  // fallback: normal chat endpoint
+  try {
+    const r = await fetch(API_BASE + '/api/pilot', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ user_message: userText, pilot: pilotSelect.value, callsign: groundCallsign.value })
+    });
+    const data = await r.json();
+    const pilotText = data.reply;
+    pushLog(pilotSelect.value + ': ' + pilotText);
+    speakText(pilotSelect.value + ', ' + pilotText);
+  } catch (err) {
+    pushLog('SYSTEM: Network error: ' + err.message);
+  }
+}
+
+// initialize default log
+pushLog('SYSTEM: Scooter 1-6 ready. Select pilot and press PTT.');
+</script>
+</body>
+</html>
